@@ -6,10 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --no-warnings --experimental-strip-types --test \"app/dashboard/earnings/__tests__/earnings-utils.test.ts\" \"app/api/payments/__tests__/payment-lifecycle.test.ts\" \"app/api/overlay/event/__tests__/overlay-lifecycle.test.ts\" \"app/api/interactions/__tests__/interactions-lifecycle.test.ts\""
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.109.0",
+    "googleapis": "^178.0.0",
+    "lucide-react": "^1.52.0",
     "next": "16.3.5",
+    "openai": "^6.49.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

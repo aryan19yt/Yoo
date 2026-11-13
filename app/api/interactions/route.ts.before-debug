@@ -1,0 +1,719 @@
+import { NextResponse } from "next/server";
+import { createSupabaseServerClient } from "@/lib/supabase-server";
+
+const ALLOWED_TYPES = [
+  "text",
+  "audio",
+  "soundboard",
+  "stickers",
+  "spin_wheel",
+  "tasks",
+] as const;
+
+type InteractionType =
+  (typeof ALLOWED_TYPES)[number];
+
+export async function GET() {
+  try {
+    const supabase =
+      await createSupabaseServerClient();
+
+    const {
+      data: {
+        user,
+      },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Unauthorized",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("creator_interactions")
+      .select(
+        "id, creator_id, interaction_type, enabled, price, settings"
+      )
+      .eq("creator_id", user.id)
+      .order("interaction_type");
+
+    if (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.message,
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      interactions: data || [],
+    });
+  } catch (error) {
+    console.error(
+      "GET /api/interactions:",
+      error
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Internal server error",
+      },
+      {
+        status: 500,
+      }
+    );
+  }
+}
+
+export async function POST(
+  request: Request
+) {
+  try {
+    const supabase =
+      await createSupabaseServerClient();
+
+    /* =====================================================
+       AUTH
+    ===================================================== */
+
+    const {
+      data: {
+        user,
+      },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Unauthorized",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    /* =====================================================
+       BODY
+    ===================================================== */
+
+    const body =
+      await request.json();
+
+    const {
+      creator_id,
+      interaction_type,
+      sender_name,
+      message,
+      amount,
+      metadata,
+    } = body;
+
+    /* =====================================================
+       CREATOR
+    ===================================================== */
+
+    if (
+      !creator_id ||
+      typeof creator_id !== "string"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Creator ID is required.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       INTERACTION TYPE
+    ===================================================== */
+
+    if (
+      !ALLOWED_TYPES.includes(
+        interaction_type as InteractionType
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Invalid interaction type.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       AMOUNT
+    ===================================================== */
+
+    const viewerAmount =
+      Number(amount);
+
+    if (
+      !Number.isFinite(
+        viewerAmount
+      ) ||
+      viewerAmount <= 0
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Please enter a valid amount.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /*
+     * We only accept whole rupees.
+     *
+     * Example:
+     * 30   ✅
+     * 138  ✅
+     * 500  ✅
+     *
+     * 30.50 ❌
+     */
+
+    if (
+      !Number.isInteger(
+        viewerAmount
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Amount must be a whole number.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       GLOBAL MINIMUM PRICE
+    ===================================================== */
+
+    const {
+      data: pricing,
+      error: pricingError,
+    } = await supabase
+      .from("interaction_pricing")
+      .select(
+        "interaction_type, minimum_price"
+      )
+      .eq(
+        "interaction_type",
+        interaction_type
+      )
+      .maybeSingle();
+
+    if (pricingError) {
+      console.error(
+        "PRICING ERROR:",
+        pricingError
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Unable to verify interaction pricing.",
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    if (!pricing) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Pricing configuration not found.",
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    const globalMinimum =
+      Number(
+        pricing.minimum_price
+      );
+
+    /* =====================================================
+       GLOBAL MINIMUM CHECK
+    ===================================================== */
+
+    if (
+      viewerAmount <
+      globalMinimum
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            `Minimum amount for ${interaction_type} is ₹${globalMinimum}.`,
+          minimum_price:
+            globalMinimum,
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       CREATOR INTERACTION
+    ===================================================== */
+
+    const {
+      data: interaction,
+      error: interactionError,
+    } = await supabase
+      .from("creator_interactions")
+      .select(
+        "id, creator_id, interaction_type, enabled, price, settings"
+      )
+      .eq(
+        "creator_id",
+        creator_id
+      )
+      .eq(
+        "interaction_type",
+        interaction_type
+      )
+      .maybeSingle();
+
+    if (interactionError) {
+      console.error(
+        "CREATOR INTERACTION ERROR:",
+        interactionError
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Unable to verify creator interaction.",
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    if (!interaction) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "This interaction is not configured by the creator.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       ENABLED CHECK
+    ===================================================== */
+
+    if (!interaction.enabled) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "This interaction is currently disabled.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       CREATOR PRICE
+    ===================================================== */
+
+    const creatorPrice =
+      Number(
+        interaction.price || 0
+      );
+
+    /*
+     * Creator price can NEVER be below
+    * StreamLounge's global minimum.
+     */
+
+    if (
+      creatorPrice <
+      globalMinimum
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Creator interaction price is below the StreamLounge minimum.",
+          minimum_price:
+            globalMinimum,
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       VIEWER CUSTOM AMOUNT
+    ===================================================== */
+
+    /*
+     * THIS IS THE IMPORTANT PART.
+     *
+     * Viewer can pay:
+     *
+     * creator price     -> ✅
+     * above creator     -> ✅
+     * below creator     -> ❌
+     *
+     * Example:
+     *
+     * Creator price = ₹30
+     *
+     * ₹30   ✅
+     * ₹50   ✅
+     * ₹138  ✅
+     * ₹500  ✅
+     *
+     * ₹29   ❌
+     * ₹10   ❌
+     */
+
+    if (
+      viewerAmount <
+      creatorPrice
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            `Minimum amount for this creator's ${interaction_type} is ₹${creatorPrice}.`,
+          creator_price:
+            creatorPrice,
+          minimum_price:
+            creatorPrice,
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       CREATOR ID SAFETY
+    ===================================================== */
+
+    /*
+     * Public viewer is allowed to submit
+     * an interaction FOR the creator.
+     *
+     * The authenticated user is NOT required
+     * to equal creator_id.
+     */
+
+    /* =====================================================
+       MESSAGE VALIDATION
+    ===================================================== */
+
+    if (
+      interaction_type === "text"
+    ) {
+      if (
+        typeof message !==
+          "string" ||
+        !message.trim()
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Message is required.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+    }
+
+    /* =====================================================
+       SOUND / AUDIO METADATA
+    ===================================================== */
+
+    let finalMessage =
+      typeof message === "string"
+        ? message.trim()
+        : null;
+
+    let finalMetadata =
+      metadata &&
+      typeof metadata ===
+        "object"
+        ? metadata
+        : {};
+
+    if (
+      interaction_type ===
+        "soundboard" &&
+      !finalMessage
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Please select a sound.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    if (
+      interaction_type ===
+      "soundboard"
+    ) {
+      const soundId =
+        finalMetadata?.sound_id;
+
+      const soundName =
+        finalMetadata?.sound_name;
+
+      if (
+        !soundId ||
+        typeof soundId !==
+          "string"
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Invalid sound selection.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      /*
+       * Verify that the sound actually
+       * belongs to this creator and is enabled.
+       */
+
+      const {
+        data: sound,
+        error: soundError,
+      } = await supabase
+        .from("soundboard_sounds")
+        .select(
+          "id, creator_id, name, storage_path, enabled"
+        )
+        .eq(
+          "id",
+          soundId
+        )
+        .eq(
+          "creator_id",
+          creator_id
+        )
+        .eq(
+          "enabled",
+          true
+        )
+        .maybeSingle();
+
+      if (soundError) {
+        console.error(
+          "SOUNDBOARD VALIDATION:",
+          soundError
+        );
+
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Unable to verify sound.",
+          },
+          {
+            status: 500,
+          }
+        );
+      }
+
+      if (!sound) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "This sound is not available.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      finalMessage =
+        sound.name;
+
+      finalMetadata = {
+        ...finalMetadata,
+
+        sound_id:
+          sound.id,
+
+        sound_name:
+          sound.name,
+
+        storage_path:
+          sound.storage_path,
+      };
+    }
+
+    /* =====================================================
+       SUBMISSION
+    ===================================================== */
+
+    const {
+      data: submission,
+      error: submissionError,
+    } = await supabase
+      .from("creator_submissions")
+      .insert({
+        creator_id,
+
+        interaction_type,
+
+        sender_name:
+          typeof sender_name ===
+          "string"
+            ? sender_name.trim()
+            : "Anonymous",
+
+        message:
+          finalMessage,
+
+        amount:
+          viewerAmount,
+
+        payment_status:
+          "pending",
+
+        status:
+          "pending",
+
+        metadata:
+          finalMetadata,
+      })
+      .select()
+      .single();
+
+    if (submissionError) {
+      console.error(
+        "SUBMISSION ERROR:",
+        submissionError
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Unable to create interaction.",
+          details:
+            submissionError.message,
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    /* =====================================================
+       SUCCESS
+    ===================================================== */
+
+    return NextResponse.json({
+      success: true,
+
+      submission,
+
+      pricing: {
+        global_minimum:
+          globalMinimum,
+
+        creator_minimum:
+          creatorPrice,
+
+        viewer_amount:
+          viewerAmount,
+      },
+
+      message:
+        "Interaction created successfully.",
+    });
+
+  } catch (error) {
+    console.error(
+      "POST /api/interactions:",
+      error
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          "Internal server error.",
+      },
+      {
+        status: 500,
+      }
+    );
+  }
+}
